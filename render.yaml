@@ -1,0 +1,61 @@
+# Blueprint de Render para el backend del SIG de microbuses (Santa Cruz).
+# Al conectar este repo en Render como "Blueprint", esto crea:
+#   1. Una base PostgreSQL con PostGIS (microbuses-sig-db)
+#   2. El servicio web FastAPI (microbuses-sig-backend), con:
+#      - SECRET_KEY generada automáticamente por Render (segura, no hace falta escribirla)
+#      - DATABASE_URL inyectada automáticamente desde la base de arriba
+#      - alembic upgrade head corre en cada arranque (idempotente) antes de uvicorn
+#
+# Plan free: la base Postgres se BORRA a los 30 días si no se pasa a un plan pago
+# (Render manda avisos antes). El servicio web free "duerme" tras ~15 min sin
+# tráfico y tarda unos segundos en despertar en la siguiente request.
+
+databases:
+  - name: microbuses-sig-db
+    databaseName: microbuses_sig
+    user: microbuses_sig
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: microbuses-sig-backend
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: microbuses-sig-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: ""
+      - key: WS_REQUIRE_AUTH
+        value: "false"
+      - key: FRECUENCIA_MIN
+        value: "15"
+      - key: SERVICIO_INICIO
+        value: "05:30"
+      - key: SERVICIO_FIN
+        value: "23:59"
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
