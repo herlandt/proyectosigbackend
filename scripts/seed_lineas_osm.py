@@ -229,20 +229,22 @@ def main():
     plan = []
     for ref in sorted(rutas, key=lambda r: (len(r), r)):
         ida, vuelta = ida_vuelta(rutas[ref])
-        circular = vuelta == ida
-        if not circular and ref in vueltas_osrm and vuelta == list(reversed(ida)):
-            vuelta = vueltas_osrm[ref]  # vuelta real por calles legales
+        # Override OSRM: vuelta real por calles legales. En circulares es el
+        # CIRCUITO INVERSO (el mismo lazo girado al revés, por la calzada opuesta).
+        if ref in vueltas_osrm and (vuelta == ida or vuelta == list(reversed(ida))):
+            vuelta = vueltas_osrm[ref]
         # Geometrías pulidas (saltos de OSM rellenados por calles): prioridad máxima
+        es_misma = vuelta == ida
         ida = pulidas.get((ref, "ida"), ida)
-        vuelta = ida if circular else pulidas.get((ref, "vuelta"), vuelta)
+        vuelta = ida if es_misma else pulidas.get((ref, "vuelta"), vuelta)
         wi, wv = wkt_line(ida), wkt_line(vuelta)
         if not wi or not wv:
             print(f"  OMITIDA {ref}: geometría insuficiente")
             continue
         p_ida, t_ida = generar_paradas_tramos(ida)
-        # Circular: sin paradas/tramos de vuelta (la vuelta es la misma ida y
-        # duplicarlas solo mete paradas dobles en el mismo lugar).
-        p_vue, t_vue = ([], []) if circular else generar_paradas_tramos(vuelta)
+        # Si la vuelta es la MISMA ida (circular sin circuito inverso), no se
+        # duplican paradas/tramos en el mismo lugar.
+        p_vue, t_vue = ([], []) if vuelta == ida else generar_paradas_tramos(vuelta)
         cat = catalogo.get(ref, {})
         origen = _limpiar_texto(cat.get("origen", ""))
         destino = _limpiar_texto(cat.get("destino", ""))

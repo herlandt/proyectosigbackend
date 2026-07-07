@@ -102,17 +102,18 @@ def main():
         if solo is not None and ref not in solo:
             continue
         ida, vuelta = ida_vuelta(rutas[ref])
-        circular = vuelta == ida
-        if not circular and ref in overrides and vuelta == list(reversed(ida)):
+        # Override OSRM (vuelta real; en circulares, el circuito inverso).
+        if ref in overrides and (vuelta == ida or vuelta == list(reversed(ida))):
             vuelta = overrides[ref]
+        misma = vuelta == ida
 
         resultados = {}
         resultados["ida"] = pulir(ida)
-        # Circular: la vuelta ES la ida — se reutiliza el pulido (sin OSRM extra).
-        resultados["vuelta"] = resultados["ida"] if circular else pulir(vuelta)
+        # Si la vuelta es la misma ida, se reutiliza el pulido (sin OSRM extra).
+        resultados["vuelta"] = resultados["ida"] if misma else pulir(vuelta)
 
         for sentido, (pulida, rell, mant) in resultados.items():
-            if sentido == "vuelta" and circular:
+            if sentido == "vuelta" and misma:
                 rell = mant = 0  # ya contados en la ida
             tot_rell += rell
             tot_mant += mant

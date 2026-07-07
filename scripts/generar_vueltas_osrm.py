@@ -24,6 +24,7 @@ Uso:
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -91,6 +92,72 @@ def en_corredor(vuelta, ida):
     return cerca / max(1, len(vuelta))
 
 
+OFFSET_CARRIL_M = 30          # corrimiento de waypoints hacia la calzada opuesta
+ESPACIADOS_CIRC_M = [600, 1000, 2000]
+RATIO_CIRC = (0.85, 1.7)      # el circuito inverso puede ser algo más largo
+
+
+def _bearing(a, b):
+    """Rumbo (grados) del punto a al b. Puntos (lon, lat)."""
+    lat1, lat2 = math.radians(a[1]), math.radians(b[1])
+    dlon = math.radians(b[0] - a[0])
+    y = math.sin(dlon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return math.degrees(math.atan2(y, x))
+
+
+def _mover(p, metros, rumbo_deg):
+    """Desplaza el punto (lon, lat) `metros` en la dirección `rumbo_deg`."""
+    r = 6371000.0
+    br = math.radians(rumbo_deg)
+    lat1, lon1 = math.radians(p[1]), math.radians(p[0])
+    dr = metros / r
+    lat2 = math.asin(math.sin(lat1) * math.cos(dr) +
+                     math.cos(lat1) * math.sin(dr) * math.cos(br))
+    lon2 = lon1 + math.atan2(math.sin(br) * math.sin(dr) * math.cos(lat1),
+                             math.cos(dr) - math.sin(lat1) * math.sin(lat2))
+    return (math.degrees(lon2), math.degrees(lat2))
+
+
+def _a_su_derecha(wps, metros=OFFSET_CARRIL_M):
+    """Corre cada waypoint hacia la DERECHA de su sentido de marcha. Así, en
+    avenidas divididas los waypoints caen sobre la calzada correcta del sentido
+    que se está calculando (y OSRM no zigzaguea con vueltas en U)."""
+    out = []
+    for i, p in enumerate(wps):
+        a = wps[i - 1] if i > 0 else wps[0]
+        b = wps[i + 1] if i < len(wps) - 1 else wps[-1]
+        out.append(_mover(p, metros, _bearing(a, b) + 90.0))
+    return out
+
+
+def calcular_vuelta_circular(ida):
+    """Circuito de VUELTA de una línea circular: el mismo lazo girado al revés,
+    por las calles legales (en avenidas divididas: la calzada opuesta).
+    Devuelve (coords, ratio, espaciado) o None."""
+    objetivo = list(reversed(ida))
+    len_ida = largo_m(ida)
+    candidatos = []
+    for esp in ESPACIADOS_CIRC_M:
+        wps = _a_su_derecha(muestrear(objetivo, esp))
+        try:
+            ruta = pedir_osrm(wps)
+        except requests.RequestException:
+            ruta = None
+        time.sleep(PAUSA_SEG)
+        if not ruta or len(ruta) < 2:
+            continue
+        ratio = largo_m(ruta) / len_ida
+        if not (RATIO_CIRC[0] <= ratio <= RATIO_CIRC[1]):
+            continue
+        if en_corredor(ruta, ida) < 0.75:  # relajado: va por la calzada de enfrente
+            continue
+        candidatos.append((ruta, ratio, esp))
+    if not candidatos:
+        return None
+    return min(candidatos, key=lambda c: abs(c[1] - 1.0))
+
+
 def calcular_vuelta(ida):
     """Devuelve (coords, ratio, espaciado) del mejor candidato OSRM, o None."""
     objetivo = list(reversed(ida))
@@ -127,45 +194,52 @@ def main():
     afectadas = []
     circulares = set()
     for ref, comps in rutas.items():
+        if solo is not None and ref not in solo:
+            continue
         ida = comps[0]
         if es_circular(ida):
-            circulares.add(ref)  # sin vuelta: el lazo va siempre en un sentido
+            circulares.add(ref)  # su vuelta es el mismo lazo girado al revés
             continue
         tiene_vuelta_real = (len(comps) >= 2 and
                              LineString(comps[1]).length >= 0.5 * LineString(ida).length)
-        if not tiene_vuelta_real and (solo is None or ref in solo):
+        if not tiene_vuelta_real:
             afectadas.append(ref)
     afectadas.sort(key=lambda r: (len(r), r))
     print(f"Líneas con vuelta = reversed(ida): {len(afectadas)} "
-          f"| circulares (sin vuelta): {sorted(circulares)}")
+          f"| circulares (circuito inverso): {sorted(circulares)}")
 
-    # Conserva lo ya calculado en corridas anteriores (re-ejecutable),
-    # PERO descarta vueltas de líneas circulares (eran un artefacto).
+    # Conserva lo ya calculado en corridas anteriores (re-ejecutable);
+    # lo que se recalcula en esta corrida se sobreescribe.
     previas = {}
     if os.path.exists(SALIDA):
         gj = json.load(open(SALIDA, encoding="utf-8"))
+        recalcular = set(afectadas) | circulares
         previas = {f["properties"]["ref"]: f for f in gj.get("features", [])
-                   if f["properties"]["ref"] not in circulares}
+                   if f["properties"]["ref"] not in recalcular}
 
     features = dict(previas)
     ok = sin_ruta = 0
-    for ref in afectadas:
+    for ref in sorted(afectadas + sorted(circulares), key=lambda r: (len(r), r)):
+        circular = ref in circulares
         ida, _ = ida_vuelta(rutas[ref])
-        res = calcular_vuelta(ida)
+        res = calcular_vuelta_circular(ida) if circular else calcular_vuelta(ida)
         if res is None:
-            print(f"  {ref:>4}: OSRM no dio una vuelta válida — se mantiene reversed(ida)")
+            print(f"  {ref:>4}: OSRM no dio una vuelta válida — "
+                  + ("queda solo la ida (circular)" if circular else "se mantiene reversed(ida)"))
             sin_ruta += 1
             continue
         coords, ratio, esp = res
         features[ref] = {
             "type": "Feature",
-            "properties": {"ref": ref, "fuente": "osrm",
+            "properties": {"ref": ref,
+                           "fuente": "osrm-circular" if circular else "osrm",
                            "ratio_vs_ida": round(ratio, 3),
                            "espaciado_waypoints_m": esp},
             "geometry": {"type": "LineString",
                          "coordinates": [[round(c[0], 6), round(c[1], 6)] for c in coords]},
         }
-        print(f"  {ref:>4}: OK (largo {ratio:.2f}x de la ida, waypoints cada {esp} m)")
+        print(f"  {ref:>4}: OK ({'circuito inverso, ' if circular else ''}"
+              f"largo {ratio:.2f}x de la ida, waypoints cada {esp} m)")
         ok += 1
 
     with open(SALIDA, "w", encoding="utf-8") as f:
