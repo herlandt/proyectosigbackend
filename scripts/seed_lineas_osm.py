@@ -38,7 +38,11 @@ from shapely.ops import linemerge
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROYECTO = os.path.dirname(BASE_DIR)
 RUTA_ENV = os.path.join(BASE_DIR, ".env")
-DIR_OSM = os.path.join(PROYECTO, "Datos_OSM")
+# En Render solo se sube la carpeta Backend/, así que Datos_OSM viaja dentro de
+# ella. En local sigue estando en la raíz del proyecto. Se prefiere la copia
+# interna si existe.
+_OSM_INTERNO = os.path.join(BASE_DIR, "Datos_OSM")
+DIR_OSM = _OSM_INTERNO if os.path.isdir(_OSM_INTERNO) else os.path.join(PROYECTO, "Datos_OSM")
 GEOJSON = os.path.join(DIR_OSM, "rutas_micros_scz_osm.geojson")
 CATALOGO = os.path.join(DIR_OSM, "catalogo_lineas_scz.csv")
 COLORES = os.path.join(DIR_OSM, "colores_lineas.json")
