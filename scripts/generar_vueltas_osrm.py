@@ -32,7 +32,13 @@ import requests
 from shapely.geometry import LineString, Point
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from seed_lineas_osm import DIR_OSM, haversine, ida_vuelta, recorridos_por_ref  # noqa: E402
+from seed_lineas_osm import (  # noqa: E402
+    DIR_OSM,
+    es_circular,
+    haversine,
+    ida_vuelta,
+    recorridos_por_ref,
+)
 
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving/"
 SALIDA = os.path.join(DIR_OSM, "vueltas_osrm.geojson")
@@ -119,20 +125,27 @@ def main():
 
     rutas = recorridos_por_ref()
     afectadas = []
+    circulares = set()
     for ref, comps in rutas.items():
         ida = comps[0]
+        if es_circular(ida):
+            circulares.add(ref)  # sin vuelta: el lazo va siempre en un sentido
+            continue
         tiene_vuelta_real = (len(comps) >= 2 and
                              LineString(comps[1]).length >= 0.5 * LineString(ida).length)
         if not tiene_vuelta_real and (solo is None or ref in solo):
             afectadas.append(ref)
     afectadas.sort(key=lambda r: (len(r), r))
-    print(f"Líneas con vuelta = reversed(ida): {len(afectadas)}")
+    print(f"Líneas con vuelta = reversed(ida): {len(afectadas)} "
+          f"| circulares (sin vuelta): {sorted(circulares)}")
 
-    # Conserva lo ya calculado en corridas anteriores (re-ejecutable).
+    # Conserva lo ya calculado en corridas anteriores (re-ejecutable),
+    # PERO descarta vueltas de líneas circulares (eran un artefacto).
     previas = {}
     if os.path.exists(SALIDA):
         gj = json.load(open(SALIDA, encoding="utf-8"))
-        previas = {f["properties"]["ref"]: f for f in gj.get("features", [])}
+        previas = {f["properties"]["ref"]: f for f in gj.get("features", [])
+                   if f["properties"]["ref"] not in circulares}
 
     features = dict(previas)
     ok = sin_ruta = 0

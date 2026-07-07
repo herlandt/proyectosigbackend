@@ -49,12 +49,16 @@ COLORES = os.path.join(DIR_OSM, "colores_lineas.json")
 # Vueltas reales calculadas con OSRM (scripts/generar_vueltas_osrm.py) para las
 # líneas donde OSM no trae el sentido de retorno; reemplazan al reversed(ida).
 VUELTAS_OSRM = os.path.join(DIR_OSM, "vueltas_osrm.geojson")
+# Geometrías pulidas (scripts/pulir_geometrias.py): saltos/huecos de OSM
+# rellenados por calles reales. Si existe, tiene prioridad máxima.
+RUTAS_PULIDAS = os.path.join(DIR_OSM, "rutas_pulidas.geojson")
 
 ESPACIADO_M = 400.0          # distancia entre paradas generadas
 VEL_MEDIA_MS = 25 * 1000 / 3600.0   # 25 km/h
 VEL_CAMINATA_MS = 1.389      # ~5 km/h
 RADIO_TRANSBORDO_M = 120     # paradas a pie si están a < 120 m
 ID_EXTERNO_OFFSET = 100000   # marca las paradas generadas (las reales son < 100000)
+UMBRAL_CIRCULAR_M = 400      # si la ida termina a < esto del inicio => línea circular
 
 
 def haversine(lon1, lat1, lon2, lat2):
@@ -115,10 +119,19 @@ def recorridos_por_ref():
     return rutas
 
 
+def es_circular(ida):
+    """True si la línea es un lazo: la ida termina donde empezó (p. ej. 72 y 73).
+    Estas líneas NO tienen vuelta — el micro siempre gira en el mismo sentido."""
+    return haversine(ida[0][0], ida[0][1], ida[-1][0], ida[-1][1]) < UMBRAL_CIRCULAR_M
+
+
 def ida_vuelta(comps):
     """ida = componente más largo. vuelta = 2º componente SOLO si es razonablemente
-    completo (>= 50% del largo de ida); si no, se usa el ida invertido."""
+    completo (>= 50% del largo de ida); si no, se usa el ida invertido.
+    Para líneas CIRCULARES la vuelta es la MISMA ida (invertirla sería contramano)."""
     ida = comps[0]
+    if es_circular(ida):
+        return ida, ida
     if len(comps) >= 2 and LineString(comps[1]).length >= 0.5 * LineString(ida).length:
         vuelta = comps[1]
     else:
@@ -132,6 +145,17 @@ def cargar_vueltas_osrm():
         return {}
     gj = json.load(open(VUELTAS_OSRM, encoding="utf-8"))
     return {f["properties"]["ref"]: [(c[0], c[1]) for c in f["geometry"]["coordinates"]]
+            for f in gj.get("features", [])
+            if f.get("geometry", {}).get("type") == "LineString"}
+
+
+def cargar_rutas_pulidas():
+    """Geometrías pulidas por (ref, sentido), si el archivo existe."""
+    if not os.path.exists(RUTAS_PULIDAS):
+        return {}
+    gj = json.load(open(RUTAS_PULIDAS, encoding="utf-8"))
+    return {(f["properties"]["ref"], f["properties"]["sentido"]):
+            [(c[0], c[1]) for c in f["geometry"]["coordinates"]]
             for f in gj.get("features", [])
             if f.get("geometry", {}).get("type") == "LineString"}
 
@@ -196,21 +220,29 @@ def main():
     catalogo = cargar_catalogo()
     colores = cargar_colores()
     vueltas_osrm = cargar_vueltas_osrm()
+    pulidas = cargar_rutas_pulidas()
     print(f"Líneas con recorrido en OSM: {len(rutas)}"
-          + (f" | vueltas OSRM: {len(vueltas_osrm)}" if vueltas_osrm else ""))
+          + (f" | vueltas OSRM: {len(vueltas_osrm)}" if vueltas_osrm else "")
+          + (f" | geometrías pulidas: {len(pulidas)}" if pulidas else ""))
 
     # Pre-cálculo (en memoria) para validar/estadísticas
     plan = []
     for ref in sorted(rutas, key=lambda r: (len(r), r)):
         ida, vuelta = ida_vuelta(rutas[ref])
-        if ref in vueltas_osrm and vuelta == list(reversed(ida)):
+        circular = vuelta == ida
+        if not circular and ref in vueltas_osrm and vuelta == list(reversed(ida)):
             vuelta = vueltas_osrm[ref]  # vuelta real por calles legales
+        # Geometrías pulidas (saltos de OSM rellenados por calles): prioridad máxima
+        ida = pulidas.get((ref, "ida"), ida)
+        vuelta = ida if circular else pulidas.get((ref, "vuelta"), vuelta)
         wi, wv = wkt_line(ida), wkt_line(vuelta)
         if not wi or not wv:
             print(f"  OMITIDA {ref}: geometría insuficiente")
             continue
         p_ida, t_ida = generar_paradas_tramos(ida)
-        p_vue, t_vue = generar_paradas_tramos(vuelta)
+        # Circular: sin paradas/tramos de vuelta (la vuelta es la misma ida y
+        # duplicarlas solo mete paradas dobles en el mismo lugar).
+        p_vue, t_vue = ([], []) if circular else generar_paradas_tramos(vuelta)
         cat = catalogo.get(ref, {})
         origen = _limpiar_texto(cat.get("origen", ""))
         destino = _limpiar_texto(cat.get("destino", ""))
